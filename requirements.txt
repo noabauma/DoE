@@ -1,0 +1,5 @@
+# Install torch CPU build first if you don't want CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch
+gpytorch
+matplotlib
