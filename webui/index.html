@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DoE — interactive Bayesian design of experiments</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2280%22>⚗️</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">⚗️ DoE <span class="sub">interactive Bayesian optimizer</span></div>
+  <div class="header-right">
+    <span id="status" class="pill busy-pill hidden"></span>
+    <span id="spend-badge" class="pill accent hidden"></span>
+    <span id="session-name" class="pill subtle"></span>
+  </div>
+</header>
+
+<!-- ============================== setup wizard ============================ -->
+<main id="setup-view" class="hidden">
+  <div class="card wizard">
+    <h2>New DoE session</h2>
+    <p class="hint">Define the mixture ingredients (with concentration ranges and
+      prices) and the responses you measure per experiment. Everything is saved
+      to the session file, so you can close the browser and resume anytime.</p>
+
+    <h3>Ingredients <span class="muted">(factors)</span></h3>
+    <table class="edit-table">
+      <thead>
+        <tr><th>name</th><th>min conc.</th><th>max conc.</th><th>price / unit</th><th></th></tr>
+      </thead>
+      <tbody id="factor-tbody"></tbody>
+    </table>
+    <button class="ghost" id="add-factor">+ add ingredient</button>
+
+    <h3>Responses <span class="muted">(measured criteria)</span></h3>
+    <div id="response-rows"></div>
+    <button class="ghost" id="add-response">+ add response</button>
+
+    <h3>Goal &amp; costs</h3>
+    <div class="grid2">
+      <label>Optimize
+        <select id="target-select"></select>
+      </label>
+      <label>Direction
+        <select id="direction">
+          <option value="max">maximize</option>
+          <option value="min">minimize</option>
+        </select>
+      </label>
+      <label>Fixed cost per experiment
+        <input id="fixed-cost" inputmode="decimal" value="0">
+      </label>
+      <label>Currency
+        <input id="currency" value="USD">
+      </label>
+      <label>Initial space-filling experiments
+        <input id="num-init" inputmode="numeric" value="4">
+      </label>
+      <label class="check">
+        <input type="checkbox" id="cost-aware">
+        prefer cheaper experiments at equal promise
+      </label>
+    </div>
+    <button id="create-session" class="primary big">Create session</button>
+  </div>
+</main>
+
+<!-- ================================ main app ============================== -->
+<main id="main-view" class="hidden">
+
+  <section class="col-left">
+    <div class="card">
+      <div class="card-head">
+        <h3>Next experiments</h3>
+        <div class="row">
+          <div class="seg" id="n-seg">
+            <button data-n="1" class="active">1</button>
+            <button data-n="2">2</button>
+            <button data-n="3">3</button>
+          </div>
+          <button id="btn-suggest" class="primary">Suggest</button>
+        </div>
+      </div>
+      <p class="hint" id="suggest-mode"></p>
+      <div id="proposals"></div>
+    </div>
+
+    <details class="card">
+      <summary>Manual entry <span class="muted">— an experiment you ran on your own</span></summary>
+      <div id="manual-body"></div>
+    </details>
+
+    <div class="card">
+      <h3>Best so far</h3>
+      <div id="best-body"></div>
+    </div>
+  </section>
+
+  <section class="col-right">
+    <div class="card">
+      <nav class="tabs">
+        <button data-tab="progress" class="active">Progress</button>
+        <button data-tab="model">Model</button>
+        <button data-tab="insights">Insights</button>
+        <button data-tab="costs" id="tab-btn-costs">Costs</button>
+      </nav>
+
+      <div id="tab-progress" class="tabpane active">
+        <div id="plot-progress" class="plot"></div>
+      </div>
+
+      <div id="tab-model" class="tabpane">
+        <div class="row response-picker" id="resp-picker"></div>
+        <div id="plot-slices" class="plot"></div>
+        <p class="hint">GP prediction with 95% band, sliced through the best
+          experiment (dotted line) one factor at a time. Dots are all measured
+          experiments — their <em>other</em> factors vary, so they need not lie
+          on the curve. ◆ marks the model's predicted optimum.</p>
+      </div>
+
+      <div id="tab-insights" class="tabpane">
+        <div class="split">
+          <div>
+            <h4>Factor influence <span class="muted">(ARD lengthscales)</span></h4>
+            <div id="plot-importance" class="plot"></div>
+          </div>
+          <div>
+            <h4>Response correlation <span class="muted">(learned task covariance)</span></h4>
+            <div id="plot-taskcorr" class="plot"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-costs" class="tabpane">
+        <div id="plot-costs" class="plot"></div>
+        <h4>Response vs. cost per experiment</h4>
+        <div id="plot-costyield" class="plot"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="full">
+    <div class="card">
+      <div class="card-head">
+        <h3>Experiment history</h3>
+        <a class="ghost btn-link" href="/api/export.csv" download>⬇ CSV</a>
+      </div>
+      <p class="hint hidden" id="history-empty">No experiments recorded yet.</p>
+      <div class="table-wrap"><table id="history"></table></div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span id="footer-note">Session auto-saves after every result — resume it later with the same
+  file, in the browser or with <code>interactive_doe.py</code>.</span>
+</footer>
+
+<div id="toast"></div>
+
+<script src="/static/plotly.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

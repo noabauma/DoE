@@ -14,11 +14,15 @@ Quick start
 from .model import MultitaskGP
 from .acquisition import expected_improvement
 from .optimize import BayesianOptimizer
+from .cost import IngredientCosts
+from .interactive import InteractiveOptimizer
 from . import plotting
 
 __all__ = [
     "MultitaskGP",
     "expected_improvement",
     "BayesianOptimizer",
+    "IngredientCosts",
+    "InteractiveOptimizer",
     "plotting",
 ]

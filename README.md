@@ -9,7 +9,9 @@ factors, then let Bayesian optimization choose the next experiment to run.
 | Module | What it provides |
 |--------|------------------|
 | `doe.MultitaskGP` | Multitask GP regression: ARD-RBF kernel over factors ⊗ learned task covariance. `fit`, `predict`, `posterior`, plus `lengthscales` and `task_covariance`. |
-| `doe.BayesianOptimizer` | Closed-loop optimization of a target response using Expected Improvement. |
+| `doe.BayesianOptimizer` | Closed-loop optimization of a target response using Expected Improvement (for callable objectives, e.g. simulations). |
+| `doe.InteractiveOptimizer` | Human-in-the-loop DoE: proposes the next 1–3 concentration sets, you enter measured lab results, the GP adapts. Session save/load, best-so-far and predicted-optimum reports. |
+| `doe.IngredientCosts` | Ingredient pricing: cost per experiment, total campaign spend, projected budget, and price of the yield (currency per response unit). |
 | `doe.expected_improvement` | The EI acquisition function (closed form). |
 | `doe.plotting` | `plot_1d`, `plot_parity`, `plot_convergence`. |
 
@@ -23,12 +25,62 @@ opt = BayesianOptimizer(objective, num_factors=3, num_tasks=2, target_task=0)
 result = opt.run(num_init=6, num_iters=20)        # result["best_x"], result["history"], ...
 ```
 
+## Interactive DoE (human in the loop)
+
+When the "objective" is a real lab experiment, use `InteractiveOptimizer`:
+it proposes the next 1–3 concentration sets, you run them and type the
+measured responses back in, and the model adapts before proposing again.
+Ingredient prices let it estimate the cost of each proposed experiment, the
+total campaign spend, and the price of the yield at the best settings.
+
+### Web UI (recommended)
+
+```bash
+.venv/bin/python doe_server.py my_session.json        # http://localhost:8080
+# from your laptop:  ssh -L 8080:localhost:8080 <user>@<lab machine>
+```
+
+The browser GUI covers the whole workflow: a setup wizard (ingredients with
+concentration ranges and prices, responses, target), suggest 1–3 experiments,
+enter measured results, and live interactive plots — optimization progress,
+GP model slices with 95% bands, factor influence, response correlation, and
+cost tracking with projections. Sessions auto-save after every result and the
+history is exportable as CSV. The same session file works in the CLI below.
+
+### CLI
+
+```bash
+.venv/bin/python interactive_doe.py my_session.json   # resumes if it exists
+```
+
+Or from Python:
+
+```python
+from doe import InteractiveOptimizer, IngredientCosts
+
+opt = InteractiveOptimizer(
+    bounds=[[0, 5], [0, 2]], num_tasks=2, target_task=0,
+    factor_names=["Li salt", "additive"],
+    response_names=["capacity", "cycle life"],
+    costs=IngredientCosts([1.2, 40.0], fixed_cost=15, currency="USD"),
+    cost_aware=True,                    # prefer cheap experiments at equal EI
+)
+proposals = opt.suggest(3)              # next 1..3 concentration sets
+opt.add_result(proposals[0], [155.2, 0.87])   # enter measured responses
+opt.best()                              # best so far incl. cost per yield
+opt.predicted_best()                    # model's predicted optimum
+opt.spend(); opt.projected_spend(10)    # campaign cost so far / budgeted
+opt.save("session.json")                # resume later with .load()
+```
+
 ## Demos
 | Script | Shows |
 |--------|-------|
 | `multitask_gp_example.py` | Single factor, two correlated responses — basic fit/predict/plot. |
 | `multitask_gp_multifactor.py` | Three factors — parity plot, ARD factor importance, task correlation. |
 | `bayesian_optimization.py` | EI loop that proposes the next experiment and converges to the optimum. |
+| `interactive_doe.py` | Interactive terminal session: setup wizard, propose → measure → enter → adapt, with cost reports. |
+| `doe_server.py` + `webui/` | Web GUI on `localhost:8080` for the whole interactive workflow, with live Plotly charts. |
 
 ## Setup
 ```bash
