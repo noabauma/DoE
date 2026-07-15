@@ -47,6 +47,33 @@ GP model slices with 95% bands, factor influence, response correlation, and
 cost tracking with projections. Sessions auto-save after every result and the
 history is exportable as CSV. The same session file works in the CLI below.
 
+### Running the web UI as a systemd service
+
+`doe.service` keeps the web UI running permanently (survives logouts and
+reboots). It starts `doe_server.py my_session.json --host 0.0.0.0 --port 8080`
+from this directory. Install and enable it once:
+
+```bash
+sudo cp doe.service /etc/systemd/system/doe.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now doe.service   # start now and on every boot
+```
+
+Manage it with:
+
+```bash
+sudo systemctl start doe.service      # start
+sudo systemctl stop doe.service       # stop
+sudo systemctl restart doe.service    # restart (e.g. after editing the code)
+systemctl status doe.service          # is it running?
+journalctl -u doe.service -f          # follow the server logs
+```
+
+After changing `doe.service` itself, re-run the `cp` and `daemon-reload`
+steps before restarting. Note that `--host 0.0.0.0` exposes the UI to the
+whole network without authentication — change it to `127.0.0.1` in
+`doe.service` if you only access it via `ssh -L` port forwarding.
+
 ### CLI
 
 ```bash

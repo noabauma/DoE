@@ -1,0 +1,16 @@
+[Unit]
+Description=DoE interactive server (Backend fuer doe.nexirius.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexirius
+WorkingDirectory=/home/nexirius/src/doe
+ExecStart=/home/nexirius/src/doe/.venv/bin/python doe_server.py my_session.json --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
