@@ -168,7 +168,9 @@ function render() {
 
 function renderChrome() {
   const st = S.state;
-  $("#session-name").textContent = st.session.replace(/^.*\//, "");
+  const btn = $("#session-name");
+  btn.textContent = "📁 " + st.session.replace(/^.*\//, "");
+  btn.title = (st.description ? st.description + " — " : "") + "manage sessions";
   const show = st.configured && isPriced();
   $("#spend-badge").classList.toggle("hidden", !show);
   if (show) {
@@ -591,6 +593,129 @@ function renderCosts() {
   }));
 }
 
+/* -------------------------------------------------------- session manager --- */
+
+function openSessions() {
+  $("#sessions-modal").classList.remove("hidden");
+  refreshSessions();
+}
+function closeSessions() {
+  $("#sessions-modal").classList.add("hidden");
+}
+
+async function refreshSessions() {
+  try {
+    renderSessions(await api("/api/sessions"));
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function fmtWhen(mtime) {
+  if (!mtime) return "–";
+  const d = new Date(mtime * 1000);
+  return d.toLocaleDateString() + " " +
+         d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+}
+
+function renderSessions(data) {
+  const tbl = $("#sessions-table");
+  const list = data.sessions || [];
+  $("#sessions-empty").classList.toggle("hidden", list.length > 0);
+  if (!list.length) { tbl.innerHTML = ""; return; }
+  const head = `<tr><th>session</th><th>description</th><th>results</th>
+    <th>last change</th><th></th></tr>`;
+  tbl.innerHTML = head + list.map((s, i) => {
+    const what = s.configured
+      ? `${s.factor_names.join(", ")} → ${s.response_names.join(", ")}`
+      : "not configured yet — loading it opens the setup wizard";
+    return `<tr class="${s.active ? "best" : ""}">
+      <td title="${esc(what)}">${esc(s.name)}${s.active
+        ? ` <span class="tag">active</span>` : ""}</td>
+      <td class="desc">${esc(s.description) || `<span class="muted">—</span>`}
+        <button class="mini-act" data-act="describe" data-i="${i}"
+          title="edit description">✎</button></td>
+      <td>${s.configured ? s.num_results : "—"}</td>
+      <td>${fmtWhen(s.modified)}</td>
+      <td class="acts">
+        <button class="mini-act" data-act="load" data-i="${i}"
+          ${s.active ? "disabled" : ""}>load</button>
+        <button class="mini-act" data-act="rename" data-i="${i}">rename</button>
+        <button class="mini-act danger" data-act="delete" data-i="${i}"
+          ${s.active ? 'disabled title="the active session cannot be deleted"'
+                     : 'title="delete the session file"'}>delete</button>
+      </td></tr>`;
+  }).join("");
+  $$("button[data-act]", tbl).forEach((b) => {
+    b.onclick = () => sessionAction(b.dataset.act, list[+b.dataset.i]);
+  });
+}
+
+async function sessionAction(act, s) {
+  try {
+    if (act === "load") {
+      busy("loading session…");
+      try {
+        await api("/api/sessions/load",
+                  {method: "POST", body: JSON.stringify({name: s.name})});
+        closeSessions();
+        await refreshState();
+        refreshModel();
+        toast(`Loaded ${s.name}`);
+      } finally {
+        idle();
+      }
+    } else if (act === "rename") {
+      const nn = prompt(`Rename ${s.name} to:`, s.name.replace(/\.json$/, ""));
+      if (nn === null || !nn.trim()) return;
+      await api("/api/sessions/rename", {method: "POST",
+                body: JSON.stringify({name: s.name, new_name: nn})});
+      await refreshSessions();
+      if (s.active) await refreshState();
+      toast("Session renamed");
+    } else if (act === "delete") {
+      const runs = s.num_results
+        ? `\n\nIts ${s.num_results} recorded experiment(s) are lost permanently.` : "";
+      if (!confirm(`Delete ${s.name}?${runs}`)) return;
+      await api("/api/sessions/delete",
+                {method: "POST", body: JSON.stringify({name: s.name})});
+      await refreshSessions();
+      toast(`${s.name} deleted`);
+    } else if (act === "describe") {
+      const d = prompt(`Description for ${s.name}:`, s.description || "");
+      if (d === null) return;
+      await api("/api/sessions/describe", {method: "POST",
+                body: JSON.stringify({name: s.name, description: d})});
+      await refreshSessions();
+      if (s.active) await refreshState();
+      toast("Description saved");
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function createSessionFile() {
+  const name = $("#new-session-name").value.trim();
+  const description = $("#new-session-desc").value.trim();
+  if (!name) return toast("Give the new session a file name", true);
+  busy("creating session…");
+  try {
+    await api("/api/sessions/create",
+              {method: "POST", body: JSON.stringify({name, description})});
+    $("#new-session-name").value = "";
+    $("#new-session-desc").value = "";
+    closeSessions();
+    await refreshState();     // unconfigured -> shows the setup wizard
+    refreshModel();
+    toast("Session created — define ingredients & responses");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    idle();
+  }
+}
+
 /* ---------------------------------------------------------------- wizard --- */
 
 function addFactorRow(name = "", lo = "", hi = "", price = "0") {
@@ -682,6 +807,16 @@ async function createSession() {
 
 function wireStaticEvents() {
   $$(".tabs button").forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
+  $("#session-name").onclick = openSessions;
+  $("#open-sessions-link").onclick = (e) => { e.preventDefault(); openSessions(); };
+  $("#sessions-close").onclick = closeSessions;
+  $("#new-session-create").onclick = createSessionFile;
+  $("#sessions-modal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeSessions();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSessions();
+  });
   $$("#n-seg button").forEach((b) => {
     b.onclick = () => {
       S.nSuggest = +b.dataset.n;
@@ -711,6 +846,7 @@ function wireStaticEvents() {
     toast("Cannot reach the DoE server: " + e.message, true);
     return;
   }
+  if (hash === "sessions") openSessions();
   try {
     await ensurePlotly();
   } catch (e) {

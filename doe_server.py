@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import math
+import re
 import threading
 from pathlib import Path
 
@@ -30,7 +31,13 @@ ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(ROOT / "webui"), static_url_path="/static")
 
 LOCK = threading.RLock()
-STATE = {"opt": None, "path": "session.json", "pending": []}
+STATE = {"opt": None, "path": "session.json", "pending": [], "desc": ""}
+
+# Remembers which session the UI selected, so it survives server restarts
+# (systemd always passes the same session argument).
+ACTIVE_MARKER = ".active_session"
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 
 
 class ApiError(Exception):
@@ -51,21 +58,73 @@ def _opt():
 
 
 def _save():
-    """Persist the session; pending proposals ride along in the same file."""
-    STATE["opt"].save(STATE["path"])
-    with open(STATE["path"]) as f:
-        data = json.load(f)
-    data["pending"] = STATE["pending"]
-    with open(STATE["path"], "w") as f:
-        json.dump(data, f, indent=2)
+    """Persist the session; description + pending proposals ride along."""
+    opt = STATE["opt"]
+    opt.meta["description"] = STATE["desc"]
+    opt.meta["pending"] = STATE["pending"]
+    opt.save(STATE["path"])
 
 
 def _load(path):
-    STATE["path"] = path
-    if Path(path).exists():
-        STATE["opt"] = InteractiveOptimizer.load(path)
-        with open(path) as f:
-            STATE["pending"] = json.load(f).get("pending", [])
+    """Make ``path`` the active session.
+
+    The file may not exist yet, or may be an unconfigured stub holding just a
+    description -- both show the setup wizard. STATE is only touched once the
+    file parsed, so a corrupt file leaves the current session active.
+    """
+    p = Path(path)
+    opt, pending, desc = None, [], ""
+    if p.is_file():
+        with open(p) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a DoE session file")
+        if "bounds" in data:
+            opt = InteractiveOptimizer.load(p)
+            pending = opt.meta.get("pending", [])
+            desc = str(opt.meta.get("description", ""))
+        else:
+            desc = str(data.get("description", ""))
+    STATE.update(path=str(path), opt=opt, pending=pending, desc=desc)
+
+
+def _sessions_dir():
+    return Path(STATE["path"]).resolve().parent
+
+
+def _session_path(name, must_exist=False, must_not_exist=False):
+    """Validate a user-supplied session name -> path inside the sessions dir.
+
+    Names come from the network, so this is the only gate between the API and
+    the filesystem: one flat directory, ``<safe name>.json`` only.
+    """
+    base = str(name or "").strip()
+    if base.endswith(".json"):
+        base = base[:-5].strip()
+    if not _NAME_RE.match(base):
+        raise ApiError("session name must start with a letter or digit and "
+                       "may only contain letters, digits, spaces and . _ - "
+                       "(at most 64 characters)")
+    directory = _sessions_dir()
+    path = (directory / f"{base}.json").resolve()
+    if path.parent != directory:  # belt and braces; the regex has no separators
+        raise ApiError("invalid session name")
+    if must_exist and not path.is_file():
+        raise ApiError(f"no session named '{base}'", 404)
+    if must_not_exist and path.exists():
+        raise ApiError(f"a session named '{base}' already exists", 409)
+    return path
+
+
+def _is_active(path):
+    return path == Path(STATE["path"]).resolve()
+
+
+def _write_marker():
+    try:
+        (_sessions_dir() / ACTIVE_MARKER).write_text(Path(STATE["path"]).name)
+    except OSError:
+        pass  # read-only dir: switching still works, it just won't persist
 
 
 def _floats(values, n, what):
@@ -101,10 +160,12 @@ def api_state():
     with LOCK:
         opt = STATE["opt"]
         if opt is None:
-            return jsonify({"configured": False, "session": STATE["path"]})
+            return jsonify({"configured": False, "session": STATE["path"],
+                            "description": STATE["desc"]})
         resp = {
             "configured": True,
             "session": STATE["path"],
+            "description": STATE["desc"],
             "factor_names": opt.factor_names,
             "response_names": opt.response_names,
             "bounds": opt.bounds.tolist(),
@@ -139,8 +200,8 @@ def api_state():
 def api_setup():
     with LOCK:
         if STATE["opt"] is not None:
-            raise ApiError("session already configured -- start the server "
-                           "with a new session file for a fresh DoE", 409)
+            raise ApiError("session already configured -- create a new "
+                           "session in the session manager for a fresh DoE", 409)
         cfg = request.get_json(force=True)
         factors = cfg.get("factors") or []
         responses = [str(r).strip() or f"response {i + 1}"
@@ -284,9 +345,135 @@ def api_export():
             if priced:
                 row.append(f"{costs[i]:.2f}")
             writer.writerow(row)
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", Path(STATE["path"]).stem)
         return Response(buf.getvalue(), mimetype="text/csv",
                         headers={"Content-Disposition":
-                                 "attachment; filename=doe_results.csv"})
+                                 f"attachment; filename={stem}_results.csv"})
+
+
+# ------------------------------------------------------- session management
+
+
+@app.get("/api/sessions")
+def api_sessions():
+    """All session files in the sessions directory, newest first."""
+    with LOCK:
+        entries = []
+        for p in _sessions_dir().glob("*.json"):
+            try:
+                with open(p) as f:
+                    data = json.load(f)
+                modified = p.stat().st_mtime
+            except (OSError, ValueError):
+                continue  # unreadable or not JSON -- not one of ours
+            if not isinstance(data, dict):
+                continue
+            configured = "bounds" in data
+            if not (configured or data.get("doe_session")):
+                continue  # some unrelated JSON file living in the directory
+            active = _is_active(p.resolve())
+            entries.append({
+                "name": p.name,
+                "description": (STATE["desc"] if active
+                                else str(data.get("description", ""))),
+                "configured": configured,
+                "num_results": len(data.get("train_x", [])),
+                "factor_names": data.get("factor_names", []),
+                "response_names": data.get("response_names", []),
+                "modified": modified,
+                "active": active,
+            })
+        if not any(e["active"] for e in entries):
+            # active session not saved to disk yet (fresh, unconfigured)
+            entries.append({
+                "name": Path(STATE["path"]).name, "description": STATE["desc"],
+                "configured": STATE["opt"] is not None,
+                "num_results": 0, "factor_names": [], "response_names": [],
+                "modified": None, "active": True,
+            })
+        entries.sort(key=lambda e: e["modified"] or math.inf, reverse=True)
+        return jsonify({"dir": str(_sessions_dir()), "sessions": entries})
+
+
+@app.post("/api/sessions/create")
+def api_sessions_create():
+    """Create a new (empty) session file and switch to it."""
+    with LOCK:
+        data = request.get_json(force=True)
+        path = _session_path(data.get("name"), must_not_exist=True)
+        desc = str(data.get("description", "")).strip()
+        with open(path, "w") as f:
+            json.dump({"doe_session": True, "description": desc}, f, indent=2)
+        _load(path)
+        _write_marker()
+        return api_state()
+
+
+@app.post("/api/sessions/load")
+def api_sessions_load():
+    with LOCK:
+        path = _session_path(request.get_json(force=True).get("name"),
+                             must_exist=True)
+        try:
+            _load(path)
+        except (ValueError, KeyError, TypeError) as err:
+            raise ApiError(f"cannot load {path.name}: {err}")
+        _write_marker()
+        return api_state()
+
+
+@app.post("/api/sessions/rename")
+def api_sessions_rename():
+    with LOCK:
+        data = request.get_json(force=True)
+        src = _session_path(data.get("name"), must_exist=True)
+        dst = _session_path(data.get("new_name"), must_not_exist=True)
+        active = _is_active(src)
+        src.rename(dst)
+        if active:
+            STATE["path"] = str(dst)
+            _write_marker()
+        return jsonify({"ok": True, "name": dst.name})
+
+
+@app.post("/api/sessions/delete")
+def api_sessions_delete():
+    with LOCK:
+        path = _session_path(request.get_json(force=True).get("name"),
+                             must_exist=True)
+        if _is_active(path):
+            raise ApiError("cannot delete the active session -- "
+                           "load a different one first", 409)
+        path.unlink()
+        return jsonify({"ok": True})
+
+
+@app.post("/api/sessions/describe")
+def api_sessions_describe():
+    with LOCK:
+        data = request.get_json(force=True)
+        path = _session_path(data.get("name"))
+        desc = str(data.get("description", "")).strip()
+        if _is_active(path):
+            STATE["desc"] = desc
+            if STATE["opt"] is not None:
+                _save()
+                return jsonify({"ok": True})
+            # unconfigured: fall through to patch the stub file, if any
+        elif not path.is_file():
+            raise ApiError(f"no session named '{path.stem}'", 404)
+        if path.is_file():
+            try:
+                with open(path) as f:
+                    file_data = json.load(f)
+            except ValueError:
+                raise ApiError(f"{path.name} is not a valid session file")
+            if not isinstance(file_data, dict):
+                raise ApiError(f"{path.name} is not a DoE session file")
+            file_data["description"] = desc
+            with open(path, "w") as f:
+                json.dump(file_data, f, indent=2)
+        return jsonify({"ok": True})
 
 
 def main():
@@ -299,10 +486,29 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    _load(args.session)
+    # The session picked in the web UI wins over the command-line default,
+    # so a UI switch survives restarts. Delete the marker file to override.
+    session = Path(args.session)
+    marker = session.resolve().parent / ACTIVE_MARKER
+    if marker.is_file():
+        name = marker.read_text().strip()
+        last = session.resolve().parent / name
+        if name and last.is_file() and last != session.resolve():
+            print(f"Resuming last active session {name} "
+                  f"(picked in the web UI; rm {ACTIVE_MARKER} to override)")
+            session = last
+    try:
+        _load(session)
+    except (ValueError, KeyError, TypeError) as err:
+        if session == Path(args.session):
+            raise SystemExit(f"cannot load {session}: {err}")
+        print(f"cannot load {session.name} ({err}) -- "
+              f"falling back to {args.session}")
+        _load(args.session)
+    _write_marker()
     resumed = (f"resumed, {STATE['opt'].num_results} results"
                if STATE["opt"] is not None else "new -- setup wizard in browser")
-    print(f"DoE web UI:  http://localhost:{args.port}   (session {args.session}: {resumed})")
+    print(f"DoE web UI:  http://localhost:{args.port}   (session {Path(STATE['path']).name}: {resumed})")
     print(f"Over ssh:    ssh -L {args.port}:localhost:{args.port} <user>@<this machine>")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
 

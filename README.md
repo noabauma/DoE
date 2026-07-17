@@ -47,6 +47,12 @@ GP model slices with 95% bands, factor influence, response correlation, and
 cost tracking with projections. Sessions auto-save after every result and the
 history is exportable as CSV. The same session file works in the CLI below.
 
+The 📁 session button in the header opens the **session manager**: a table of
+all session files next to the server (with description, result count and last
+change) where you can load, create, rename, delete and annotate sessions
+without restarting the server. The selected session is remembered in
+`.active_session`, so it survives server restarts.
+
 ### Running the web UI as a systemd service
 
 `doe.service` keeps the web UI running permanently (survives logouts and

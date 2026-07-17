@@ -14,7 +14,7 @@
   <div class="header-right">
     <span id="status" class="pill busy-pill hidden"></span>
     <span id="spend-badge" class="pill accent hidden"></span>
-    <span id="session-name" class="pill subtle"></span>
+    <button id="session-name" class="pill subtle session-btn" title="manage sessions"></button>
   </div>
 </header>
 
@@ -24,7 +24,9 @@
     <h2>New DoE session</h2>
     <p class="hint">Define the mixture ingredients (with concentration ranges and
       prices) and the responses you measure per experiment. Everything is saved
-      to the session file, so you can close the browser and resume anytime.</p>
+      to the session file, so you can close the browser and resume anytime.
+      Looking for earlier work? <a href="#" id="open-sessions-link">Open the
+      session manager</a>.</p>
 
     <h3>Ingredients <span class="muted">(factors)</span></h3>
     <table class="edit-table">
@@ -159,6 +161,32 @@
   <span id="footer-note">Session auto-saves after every result — resume it later with the same
   file, in the browser or with <code>interactive_doe.py</code>.</span>
 </footer>
+
+<!-- ============================ session manager =========================== -->
+<div id="sessions-modal" class="modal hidden" role="dialog" aria-modal="true"
+     aria-labelledby="sessions-title">
+  <div class="modal-card card">
+    <div class="card-head">
+      <h3 id="sessions-title">Session manager</h3>
+      <button class="del" id="sessions-close" title="close">×</button>
+    </div>
+    <p class="hint">Each DoE campaign is one <code>.json</code> file in the
+      server's session folder. Load one to switch — the choice is remembered
+      across server restarts.</p>
+    <div class="table-wrap"><table id="sessions-table" class="sessions"></table></div>
+    <p class="hint hidden" id="sessions-empty">No session files yet — create one below.</p>
+    <h4>New session</h4>
+    <div class="entry">
+      <label class="mini">file name
+        <input id="new-session-name" placeholder="e.g. electrolyte_v2"></label>
+      <label class="mini grow">description
+        <input id="new-session-desc" placeholder="optional — what is this campaign about?"></label>
+      <button class="primary" id="new-session-create">Create</button>
+    </div>
+    <p class="hint">Creating a session switches to it and opens the setup wizard
+      for its ingredients and responses.</p>
+  </div>
+</div>
 
 <div id="toast"></div>
 

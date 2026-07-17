@@ -15,11 +15,21 @@ refits so the next proposals adapt to the new results:
 """
 
 import json
+import os
+
 import torch
 
 from .model import MultitaskGP
 from .acquisition import expected_improvement
 from .cost import IngredientCosts
+
+# Keys save()/load() own; everything else in a session file is user metadata
+# (description, pending proposals, ...) and round-trips via ``meta``.
+_SESSION_KEYS = frozenset({
+    "bounds", "num_tasks", "target_task", "maximize", "cost_aware",
+    "num_init", "factor_names", "response_names", "train_x", "train_y",
+    "costs",
+})
 
 
 class InteractiveOptimizer:
@@ -66,6 +76,7 @@ class InteractiveOptimizer:
         self.train_x = torch.empty(0, self.num_factors)
         self.train_y = torch.empty(0, num_tasks)
         self.gp = None
+        self.meta = {}  # extra session-file keys (e.g. "description")
 
     # ------------------------------------------------------------------ data
 
@@ -212,8 +223,14 @@ class InteractiveOptimizer:
     # ----------------------------------------------------------- persistence
 
     def save(self, path):
-        """Save the session (config + all results) to a JSON file."""
+        """Save the session (config + all results) to a JSON file.
+
+        Extra keys in :attr:`meta` -- a session description, keys written by
+        other tools -- are saved back too, so they survive round-trips. The
+        file is replaced atomically.
+        """
         state = {
+            **self.meta,
             "bounds": self.bounds.tolist(),
             "num_tasks": self.num_tasks,
             "target_task": self.target_task,
@@ -232,8 +249,10 @@ class InteractiveOptimizer:
                 "names": self.costs.names,
                 "currency": self.costs.currency,
             }
-        with open(path, "w") as f:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path):
@@ -262,4 +281,5 @@ class InteractiveOptimizer:
         if state["train_x"]:
             opt.train_x = torch.tensor(state["train_x"], dtype=torch.float32)
             opt.train_y = torch.tensor(state["train_y"], dtype=torch.float32)
+        opt.meta = {k: v for k, v in state.items() if k not in _SESSION_KEYS}
         return opt
