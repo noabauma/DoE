@@ -106,6 +106,7 @@
       <nav class="tabs">
         <button data-tab="progress" class="active">Progress</button>
         <button data-tab="model">Model</button>
+        <button data-tab="landscape" id="tab-btn-landscape">Landscape</button>
         <button data-tab="insights">Insights</button>
         <button data-tab="costs" id="tab-btn-costs">Costs</button>
       </nav>
@@ -121,6 +122,17 @@
           experiment (dotted line) one factor at a time. Dots are all measured
           experiments — their <em>other</em> factors vary, so they need not lie
           on the curve. ◆ marks the model's predicted optimum.</p>
+      </div>
+
+      <div id="tab-landscape" class="tabpane">
+        <div class="row response-picker" id="resp-picker-landscape"></div>
+        <div id="plot-landscape" class="plot"></div>
+        <p class="hint">Predicted response over every ingredient pair, the
+          other ingredients held at the best experiment (★). Lower maps: GP
+          mean — same color scale as the measured dots in the upper scatters,
+          so a dot that clashes with the map around it disagrees with the
+          model. Diagonal: the 1D slices with 95% band. ◆ predicted optimum,
+          ✕ open proposals.</p>
       </div>
 
       <div id="tab-insights" class="tabpane">

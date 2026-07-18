@@ -86,6 +86,7 @@ def _load(path):
         else:
             desc = str(data.get("description", ""))
     STATE.update(path=str(path), opt=opt, pending=pending, desc=desc)
+    STATE.pop("predicted_best", None)  # cached GP belongs to the old session
 
 
 def _sessions_dir():
@@ -148,6 +149,16 @@ def _point(opt, info):
         if key in info:
             out[key] = info[key]
     return out
+
+
+def _predicted_best(opt):
+    """predicted_best() searches a fresh random candidate pool each call;
+    cache one result per fitted GP so every tab shows the same optimum."""
+    gp = opt.fitted_gp()
+    cached = STATE.get("predicted_best")
+    if cached is None or cached[0] is not gp:
+        STATE["predicted_best"] = (gp, opt.predicted_best())
+    return STATE["predicted_best"][1]
 
 
 @app.route("/")
@@ -237,6 +248,7 @@ def api_setup():
             response_names=responses,
         )
         STATE["pending"] = []
+        STATE.pop("predicted_best", None)
         _save()
         return api_state()
 
@@ -321,7 +333,67 @@ def api_model():
             "slices": slices,
             "importance": importance,
             "task_correlation": correlation,
-            "predicted_best": _point(opt, opt.predicted_best()),
+            "predicted_best": _point(opt, _predicted_best(opt)),
+        })
+
+
+@app.get("/api/landscape")
+def api_landscape():
+    """GP response surface over every factor pair (corner-plot data).
+
+    For each pair (i, j) the remaining factors are held at the best measured
+    experiment (same reference as /api/model), and the GP posterior is
+    evaluated on a grid_n x grid_n grid: ``mean[task][row][col]`` where rows
+    follow factor j and columns factor i.
+    """
+    with LOCK:
+        opt = _opt()
+        if opt.num_factors < 2:
+            return jsonify({"available": False,
+                            "reason": "The landscape shows ingredient pairs -- "
+                                      "this session has only one ingredient."})
+        if opt.num_results < 2:
+            return jsonify({"available": False,
+                            "reason": f"Add at least 2 results to see the "
+                                      f"landscape (have {opt.num_results})."})
+        try:
+            gp = opt.fitted_gp()
+        except Exception as err:  # noqa: BLE001 -- surface fit problems in the UI
+            return jsonify({"available": False, "reason": f"GP fit failed: {err}"})
+
+        ref = opt.best()["x"]
+        F = opt.num_factors
+        grid_n = 40 if F == 2 else 28 if F <= 4 else 18
+        pairs = []
+        for i in range(F):
+            for j in range(i + 1, F):
+                gi = torch.linspace(*opt.bounds[i].tolist(), grid_n)
+                gj = torch.linspace(*opt.bounds[j].tolist(), grid_n)
+                X = ref.unsqueeze(0).repeat(grid_n * grid_n, 1)
+                X[:, i] = gi.repeat(grid_n)                # columns sweep i
+                X[:, j] = gj.repeat_interleave(grid_n)     # rows sweep j
+                # predictive distribution (incl. observation noise) -- the
+                # same uncertainty convention as the /api/model bands
+                mean, lower, upper = gp.predict(X)
+                mean = mean.reshape(grid_n, grid_n, opt.num_tasks)
+                std = ((upper - lower) / 4.0).reshape(   # 95% band = +-2 sigma
+                    grid_n, grid_n, opt.num_tasks)
+                pairs.append({
+                    "i": i, "j": j,
+                    "gi": gi.tolist(), "gj": gj.tolist(),
+                    "mean": mean.permute(2, 0, 1).tolist(),  # [task][row][col]
+                    "std": std.permute(2, 0, 1).tolist(),
+                })
+        return jsonify({
+            "available": True,
+            # session + result count let the client detect a payload that
+            # belongs to another session or data version (the server is
+            # shared -- a second window can switch sessions under us)
+            "session": STATE["path"],
+            "n": opt.num_results,
+            "reference": ref.tolist(),
+            "pairs": pairs,
+            "predicted_best": _point(opt, _predicted_best(opt)),
         })
 
 

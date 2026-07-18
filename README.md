@@ -43,7 +43,9 @@ total campaign spend, and the price of the yield at the best settings.
 The browser GUI covers the whole workflow: a setup wizard (ingredients with
 concentration ranges and prices, responses, target), suggest 1–3 experiments,
 enter measured results, and live interactive plots — optimization progress,
-GP model slices with 95% bands, factor influence, response correlation, and
+GP model slices with 95% bands, a landscape corner plot (predicted response
+maps over every ingredient pair, with the experiments, predicted optimum and
+open proposals drawn on top), factor influence, response correlation, and
 cost tracking with projections. Sessions auto-save after every result and the
 history is exportable as CSV. The same session file works in the CLI below.
 

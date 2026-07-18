@@ -7,8 +7,12 @@ const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const S = {
   state: null,          // /api/state payload
   model: null,          // /api/model payload
+  landscape: null,      // /api/landscape payload (fetched when the tab opens)
+  landscapeGen: 0,      // bumped on invalidation, discards in-flight fetches
+  landscapeLoading: false,
+  landscapeResyncGen: -1, // gen for which the staleness guard already resynced
   tab: "progress",
-  respSel: 0,           // response shown in the Model tab
+  respSel: 0,           // response shown in the Model/Landscape tabs
   nSuggest: 1,
   wizardBuilt: false,
 };
@@ -126,6 +130,14 @@ async function refreshState() {
   render();
 }
 
+// The landscape is expensive to compute, so it is cached until the data
+// changes. Call this BEFORE refreshState() at every mutation site, so the
+// stale payload can never render against the new state.
+function invalidateLandscape() {
+  S.landscape = null;
+  S.landscapeGen++;     // drops any in-flight fetch
+}
+
 async function refreshModel() {
   const st = S.state;
   if (!st || !st.configured || st.num_results < 2) {
@@ -157,6 +169,9 @@ function render() {
 
   $("#tab-btn-costs").classList.toggle("hidden", !isPriced());
   if (S.tab === "costs" && !isPriced()) switchTab("progress");
+  const hasPairs = st.factor_names.length >= 2;
+  $("#tab-btn-landscape").classList.toggle("hidden", !hasPairs);
+  if (S.tab === "landscape" && !hasPairs) switchTab("progress");
   if (S.respSel >= st.response_names.length) S.respSel = 0;
 
   renderProposals();
@@ -227,6 +242,7 @@ async function saveProposal(i, x, row) {
       method: "POST",
       body: JSON.stringify({x, y, pending_index: i}),
     });
+    invalidateLandscape();
     await refreshState();
     toast("Result saved — model updated");
     refreshModel();
@@ -258,6 +274,7 @@ function renderManual() {
     busy("updating model…");
     try {
       await api("/api/result", {method: "POST", body: JSON.stringify({x, y})});
+      invalidateLandscape();
       await refreshState();
       toast("Result saved — model updated");
       refreshModel();
@@ -340,6 +357,7 @@ function renderHistory() {
       busy("deleting…");
       try {
         await api(`/api/result/${i}`, {method: "DELETE"});
+        invalidateLandscape();
         await refreshState();
         refreshModel();
       } catch (e) {
@@ -355,6 +373,9 @@ function renderHistory() {
 
 function switchTab(tab) {
   S.tab = tab;
+  // a cached transport failure (server restart etc.) retries on re-entry
+  if (tab === "landscape" && S.landscape && !S.landscape.available &&
+      S.landscape.transient) S.landscape = null;
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tabpane").forEach((p) => p.classList.toggle("active", p.id === "tab-" + tab));
   renderPlotsFor(tab);
@@ -364,6 +385,7 @@ function renderPlotsFor(tab) {
   if (!S.state || !S.state.configured || !window.Plotly) return;
   if (tab === "progress") renderProgress();
   else if (tab === "model") renderModelTab();
+  else if (tab === "landscape") renderLandscape();
   else if (tab === "insights") renderInsights();
   else if (tab === "costs") renderCosts();
 }
@@ -432,7 +454,7 @@ function renderProgress() {
 
 function renderModelTab() {
   const st = S.state;
-  renderPicker();
+  renderRespPicker($("#resp-picker"), renderModelTab);
   const el = $("#plot-slices");
   const m = S.model;
   if (!m || !m.available) {
@@ -484,15 +506,234 @@ function renderModelTab() {
   plot(el, traces, layout);
 }
 
-function renderPicker() {
+function renderRespPicker(el, onpick) {
   const st = S.state;
-  const el = $("#resp-picker");
   el.innerHTML = st.response_names.map((nm, t) =>
     `<button class="${t === S.respSel ? "active" : ""}" data-t="${t}">${esc(nm)}</button>`
   ).join("");
   $$("button", el).forEach((b) => {
-    b.onclick = () => { S.respSel = +b.dataset.t; renderModelTab(); };
+    b.onclick = () => { S.respSel = +b.dataset.t; onpick(); };
   });
+}
+
+/* ---- landscape: corner plot over every factor pair ---- */
+
+async function fetchLandscape() {
+  if (S.landscapeLoading) return;
+  S.landscapeLoading = true;
+  const gen = S.landscapeGen;
+  busy("computing landscape…");
+  let data;
+  try {
+    data = await api("/api/landscape");
+  } catch (e) {
+    data = {available: false, reason: e.message, transient: true};
+  } finally {
+    S.landscapeLoading = false;
+    idle();
+  }
+  // if the data changed while this was in flight, drop it and refetch
+  S.landscape = gen === S.landscapeGen ? data : null;
+  if (S.tab === "landscape" && S.state && S.state.configured) renderLandscape();
+}
+
+function renderLandscape() {
+  const st = S.state;
+  renderRespPicker($("#resp-picker-landscape"), renderLandscape);
+  const el = $("#plot-landscape");
+  let L = S.landscape;
+  if (L && L.available && (L.session !== st.session ||
+      L.n !== st.num_results ||
+      L.reference.length !== st.factor_names.length ||
+      L.pairs[0].mean.length !== st.response_names.length)) {
+    // The payload belongs to another session or data version -- the server
+    // is shared, so a second window can switch it under us. Refetching alone
+    // would loop (the server keeps answering for *its* session); resync the
+    // state instead and let render() fetch again once both sides agree.
+    // At most one automatic resync per generation, in case they never do.
+    const resynced = S.landscapeResyncGen === S.landscapeGen;
+    invalidateLandscape();
+    if (resynced) {
+      ph(el, "Out of sync with the server — reload the page.");
+      return;
+    }
+    S.landscapeResyncGen = S.landscapeGen;
+    ph(el, "Session changed — reloading…");
+    refreshState().then(refreshModel).catch((e) => toast(e.message, true));
+    return;
+  }
+  if (!L) {
+    ph(el, "Computing landscape…");
+    fetchLandscape();
+    return;
+  }
+  if (!L.available) {
+    ph(el, L.reason);
+    return;
+  }
+  const t = S.respSel;
+  const F = st.factor_names.length;
+  const respName = st.response_names[t];
+  const ty = st.results_y.map((r) => r[t]);
+  const runs = range1(st.num_results);
+
+  // One color scale shared by the predicted maps and the measured dots, so
+  // a dot that clashes with the map around it disagrees with the model.
+  let zmin = Infinity, zmax = -Infinity;
+  const take = (v) => {
+    if (v < zmin) zmin = v;
+    if (v > zmax) zmax = v;
+  };
+  L.pairs.forEach((p) => p.mean[t].forEach((row) => row.forEach(take)));
+  ty.forEach(take);
+
+  // shared value range for the diagonal slice cells (only (0,0) shows ticks)
+  // -- the model must belong to this session's factors/responses
+  const m = S.model && S.model.available &&
+    S.model.reference.length === F &&
+    S.model.slices[0].mean.length === st.response_names.length
+    ? S.model : null;
+  let smin = Infinity, smax = -Infinity;
+  if (m) {
+    m.slices.forEach((sl) => {
+      sl.lower[t].forEach((v) => { if (v < smin) smin = v; });
+      sl.upper[t].forEach((v) => { if (v > smax) smax = v; });
+    });
+    ty.forEach((v) => {
+      if (v < smin) smin = v;
+      if (v > smax) smax = v;
+    });
+  }
+
+  const traces = [];
+  // cells stay roughly square: derive the row height from the pane width
+  const cellH = Math.max(110, Math.min(235, (el.clientWidth || 940) / F));
+  const layout = baseLayout({
+    showlegend: false,
+    height: Math.max(440, Math.round(cellH * F) + 70),
+    grid: {rows: F, columns: F, pattern: "independent"},
+    margin: {l: 62, r: 14, t: 16, b: 46},
+  });
+  if (!m) {
+    // slices come from /api/model -- say why the diagonal is empty
+    layout.annotations = [{
+      x: 0.5 / F, y: 1 - 0.5 / F, xref: "paper", yref: "paper",
+      text: esc((S.model && S.model.reason) || "1D slices load with the model…"),
+      showarrow: false, font: {size: 10, color: "#8b94a8"},
+    }];
+  }
+  const suf = (r, c) => (r * F + c ? String(r * F + c + 1) : "");
+  const pad = (lo, hi) => {
+    const w = (hi - lo) * 0.03;
+    return [lo - w, hi + w];
+  };
+  for (let r = 0; r < F; r++) {
+    for (let c = 0; c < F; c++) {
+      const ax = suf(r, c);
+      layout["xaxis" + ax] = {
+        ...AXG, range: pad(...st.bounds[c]), tickfont: {size: 9},
+        showticklabels: r === F - 1,
+        title: r === F - 1 ? {text: st.factor_names[c], font: {size: 11}} : undefined,
+      };
+      layout["yaxis" + ax] = r === c
+        ? {...AXG, tickfont: {size: 9}, showticklabels: !!m && c === 0,
+           range: m && isFinite(smin) && smin < smax ? pad(smin, smax) : [0, 1]}
+        : {...AXG, range: pad(...st.bounds[r]), tickfont: {size: 9},
+           showticklabels: c === 0,
+           title: c === 0 ? {text: st.factor_names[r], font: {size: 11}} : undefined};
+    }
+  }
+
+  // diagonal: the 1D slices (band + mean + observed)
+  if (m) {
+    m.slices.forEach((sl, d) => {
+      const ax = suf(d, d), xa = "x" + ax, ya = "y" + ax;
+      traces.push({x: sl.grid, y: sl.upper[t], mode: "lines", line: {width: 0},
+                   hoverinfo: "skip", xaxis: xa, yaxis: ya});
+      traces.push({x: sl.grid, y: sl.lower[t], mode: "lines", line: {width: 0},
+                   fill: "tonexty", fillcolor: "rgba(90,200,250,.16)",
+                   hoverinfo: "skip", xaxis: xa, yaxis: ya});
+      traces.push({x: sl.grid, y: sl.mean[t], mode: "lines",
+                   line: {color: "#5ac8fa", width: 2},
+                   hovertemplate: `${esc(st.factor_names[d])}: %{x:.4g}<br>` +
+                     `predicted ${esc(respName)}: %{y:.4g}<extra></extra>`,
+                   xaxis: xa, yaxis: ya});
+      traces.push({x: st.results_x.map((r) => r[d]), y: ty, mode: "markers",
+                   marker: {color: "#e6ecf5", size: 4, opacity: .8},
+                   hoverinfo: "skip", xaxis: xa, yaxis: ya});
+    });
+  }
+
+  L.pairs.forEach((p, idx) => {
+    const fi = st.factor_names[p.i], fj = st.factor_names[p.j];
+    const xi = st.results_x.map((r) => r[p.i]);
+    const xj = st.results_x.map((r) => r[p.j]);
+
+    // lower triangle (row j, col i): predicted response surface
+    let ax = suf(p.j, p.i), xa = "x" + ax, ya = "y" + ax;
+    traces.push({
+      type: "heatmap", x: p.gi, y: p.gj, z: p.mean[t], customdata: p.std[t],
+      zmin, zmax, colorscale: "Viridis", zsmooth: "best",
+      showscale: idx === 0,
+      colorbar: {title: {text: respName}, thickness: 12, outlinewidth: 0},
+      hovertemplate: `${esc(fi)}: %{x:.4g}<br>${esc(fj)}: %{y:.4g}<br>` +
+        `predicted ${esc(respName)}: %{z:.4g} ± %{customdata:.2g}<extra></extra>`,
+      xaxis: xa, yaxis: ya,
+    });
+    traces.push({x: xi, y: xj, mode: "markers", hoverinfo: "skip",
+                 marker: {color: "rgba(255,255,255,.85)", size: 4},
+                 xaxis: xa, yaxis: ya});
+    if (st.best) {
+      traces.push({x: [st.best.x[p.i]], y: [st.best.x[p.j]], mode: "markers",
+                   marker: {symbol: "star", size: 12, color: "#7bd88f",
+                            line: {color: "#0b101b", width: 1}},
+                   hovertemplate: "best measured<extra></extra>",
+                   xaxis: xa, yaxis: ya});
+    }
+    if (L.predicted_best) {
+      traces.push({x: [L.predicted_best.x[p.i]], y: [L.predicted_best.x[p.j]],
+                   mode: "markers",
+                   marker: {symbol: "diamond", size: 10, color: "#ffd166",
+                            line: {color: "#0b101b", width: 1}},
+                   hovertemplate: "predicted optimum<extra></extra>",
+                   xaxis: xa, yaxis: ya});
+    }
+    if (st.pending.length) {
+      traces.push({x: st.pending.map((x) => x[p.i]),
+                   y: st.pending.map((x) => x[p.j]), mode: "markers",
+                   marker: {symbol: "x-thin", size: 9,
+                            line: {color: "#ff7a90", width: 2}},
+                   hovertemplate: "open proposal<extra></extra>",
+                   xaxis: xa, yaxis: ya});
+    }
+
+    // upper triangle (row i, col j): experiments colored by measurement
+    ax = suf(p.i, p.j); xa = "x" + ax; ya = "y" + ax;
+    traces.push({
+      x: xj, y: xi, mode: "markers", customdata: runs,
+      marker: {color: ty, cmin: zmin, cmax: zmax, colorscale: "Viridis",
+               size: 9, line: {color: "rgba(255,255,255,.55)", width: 1}},
+      hovertemplate: `#%{customdata}<br>${esc(fj)}: %{x:.4g}<br>` +
+        `${esc(fi)}: %{y:.4g}<br>${esc(respName)}: %{marker.color:.4g}<extra></extra>`,
+      xaxis: xa, yaxis: ya,
+    });
+    if (st.best) {
+      traces.push({x: [st.best.x[p.j]], y: [st.best.x[p.i]], mode: "markers",
+                   marker: {symbol: "star", size: 13, color: "#7bd88f",
+                            line: {color: "#0b101b", width: 1}},
+                   hovertemplate: "best measured<extra></extra>",
+                   xaxis: xa, yaxis: ya});
+    }
+    if (st.pending.length) {
+      traces.push({x: st.pending.map((x) => x[p.j]),
+                   y: st.pending.map((x) => x[p.i]), mode: "markers",
+                   marker: {symbol: "x-thin", size: 9,
+                            line: {color: "#ff7a90", width: 2}},
+                   hovertemplate: "open proposal<extra></extra>",
+                   xaxis: xa, yaxis: ya});
+    }
+  });
+  plot(el, traces, layout);
 }
 
 function renderInsights() {
@@ -659,6 +900,8 @@ async function sessionAction(act, s) {
         await api("/api/sessions/load",
                   {method: "POST", body: JSON.stringify({name: s.name})});
         closeSessions();
+        invalidateLandscape();
+        S.model = null;     // the old session's model must not render either
         await refreshState();
         refreshModel();
         toast(`Loaded ${s.name}`);
@@ -706,6 +949,8 @@ async function createSessionFile() {
     $("#new-session-name").value = "";
     $("#new-session-desc").value = "";
     closeSessions();
+    invalidateLandscape();
+    S.model = null;
     await refreshState();     // unconfigured -> shows the setup wizard
     refreshModel();
     toast("Session created — define ingredients & responses");
@@ -839,7 +1084,7 @@ function wireStaticEvents() {
 (async function init() {
   wireStaticEvents();
   const hash = location.hash.slice(1);
-  if (["progress", "model", "insights", "costs"].includes(hash)) switchTab(hash);
+  if (["progress", "model", "landscape", "insights", "costs"].includes(hash)) switchTab(hash);
   try {
     await refreshState();
   } catch (e) {
