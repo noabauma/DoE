@@ -29,6 +29,8 @@
     "capacity [mAh/g]",
     "retention @100 [%]"
   ],
+  "kernel": "poly",
+  "poly_degree": 2,
   "train_x": [
     [
       8.5,

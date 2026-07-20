@@ -109,6 +109,15 @@
         <button data-tab="landscape" id="tab-btn-landscape">Landscape</button>
         <button data-tab="insights">Insights</button>
         <button data-tab="costs" id="tab-btn-costs">Costs</button>
+        <span class="fit-ctl" title="How the model fits your results — the flexible
+GP learns its shape from the data; the polynomial forces an n-degree polynomial.">
+          fit
+          <select id="fit-kernel">
+            <option value="rbf">GP (RBF)</option>
+            <option value="poly">polynomial</option>
+          </select>
+          <input id="fit-degree" inputmode="numeric" title="polynomial degree (1–10)">
+        </span>
       </nav>
 
       <div id="tab-progress" class="tabpane active">

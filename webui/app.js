@@ -169,6 +169,7 @@ function render() {
 
   $("#tab-btn-costs").classList.toggle("hidden", !isPriced());
   if (S.tab === "costs" && !isPriced()) switchTab("progress");
+  renderFitControl();
   const hasPairs = st.factor_names.length >= 2;
   $("#tab-btn-landscape").classList.toggle("hidden", !hasPairs);
   if (S.tab === "landscape" && !hasPairs) switchTab("progress");
@@ -191,6 +192,43 @@ function renderChrome() {
   if (show) {
     $("#spend-badge").textContent =
       `${st.num_results} runs · spent ${money(st.spend)} ${currency()}`;
+  }
+}
+
+/* ---- posterior fit choice (GP vs. n-degree polynomial) ---- */
+
+function renderFitControl() {
+  const st = S.state;
+  const sel = $("#fit-kernel");
+  const deg = $("#fit-degree");
+  // "|| default": a not-yet-restarted server doesn't send the fields
+  const kernel = st.kernel || "rbf";
+  // don't clobber a value the user is editing right now
+  if (document.activeElement !== sel) sel.value = kernel;
+  if (document.activeElement !== deg) deg.value = st.poly_degree || 2;
+  deg.classList.toggle("hidden", kernel !== "poly");
+}
+
+async function applyFit() {
+  const kernel = $("#fit-kernel").value;
+  const raw = parseNum($("#fit-degree").value);
+  const degree = Math.max(1, Math.min(10, Math.round(raw ?? S.state.poly_degree)));
+  busy("refitting…");
+  try {
+    await api("/api/fit", {method: "POST",
+                           body: JSON.stringify({kernel, degree})});
+    invalidateLandscape();
+    S.model = null;         // the old fit's slices must not render
+    await refreshState();
+    refreshModel();
+    toast(kernel === "poly"
+      ? `Fitting a degree-${degree} polynomial`
+      : "Fitting the flexible GP (RBF)");
+  } catch (e) {
+    toast(e.message, true);
+    renderFitControl();     // snap the control back to the server's truth
+  } finally {
+    idle();
   }
 }
 
@@ -544,6 +582,8 @@ function renderLandscape() {
   let L = S.landscape;
   if (L && L.available && (L.session !== st.session ||
       L.n !== st.num_results ||
+      L.kernel !== st.kernel ||
+      L.poly_degree !== st.poly_degree ||
       L.reference.length !== st.factor_names.length ||
       L.pairs[0].mean.length !== st.response_names.length)) {
     // The payload belongs to another session or data version -- the server
@@ -747,15 +787,20 @@ function renderInsights() {
     ph(el2, "");
     return;
   }
-  plot(el1, [{
-    x: m.importance, y: st.factor_names, type: "bar", orientation: "h",
-    marker: {color: "#5ac8fa"},
-    hovertemplate: "%{y}: %{x:.2f}<extra></extra>",
-  }], baseLayout({
-    height: Math.max(200, 62 * st.factor_names.length + 110),
-    xaxis: {...AXG, range: [0, 1.06], title: {text: "relative influence (1/lengthscale)"}},
-    yaxis: {...AXG, autorange: "reversed"},
-  }));
+  if (!m.importance) {
+    ph(el1, "Factor influence is read from the GP's learned lengthscales — " +
+            "the polynomial fit has none. Switch the fit to GP (RBF) to see it.");
+  } else {
+    plot(el1, [{
+      x: m.importance, y: st.factor_names, type: "bar", orientation: "h",
+      marker: {color: "#5ac8fa"},
+      hovertemplate: "%{y}: %{x:.2f}<extra></extra>",
+    }], baseLayout({
+      height: Math.max(200, 62 * st.factor_names.length + 110),
+      xaxis: {...AXG, range: [0, 1.06], title: {text: "relative influence (1/lengthscale)"}},
+      yaxis: {...AXG, autorange: "reversed"},
+    }));
+  }
 
   const names = st.response_names;
   const corr = m.task_correlation;
@@ -1052,6 +1097,8 @@ async function createSession() {
 
 function wireStaticEvents() {
   $$(".tabs button").forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
+  $("#fit-kernel").onchange = applyFit;
+  $("#fit-degree").onchange = applyFit;
   $("#session-name").onclick = openSessions;
   $("#open-sessions-link").onclick = (e) => { e.preventDefault(); openSessions(); };
   $("#sessions-close").onclick = closeSessions;

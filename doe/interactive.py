@@ -28,7 +28,7 @@ from .cost import IngredientCosts
 _SESSION_KEYS = frozenset({
     "bounds", "num_tasks", "target_task", "maximize", "cost_aware",
     "num_init", "factor_names", "response_names", "train_x", "train_y",
-    "costs",
+    "costs", "kernel", "poly_degree",
 })
 
 
@@ -54,11 +54,15 @@ class InteractiveOptimizer:
     num_init       : results required before switching to GP-guided proposals.
     factor_names   : optional ingredient names for reports.
     response_names : optional response names for reports.
+    kernel         : how the posterior is fit -- "rbf" (default, flexible GP)
+                     or "poly" (posterior mean is an n-degree polynomial).
+    poly_degree    : the n for kernel="poly" (1..10).
     """
 
     def __init__(self, bounds, num_tasks, target_task=0, maximize=True,
                  costs=None, cost_aware=False, num_init=4,
-                 factor_names=None, response_names=None):
+                 factor_names=None, response_names=None,
+                 kernel="rbf", poly_degree=2):
         self.bounds = torch.as_tensor(bounds, dtype=torch.float32).reshape(-1, 2)
         self.num_factors = self.bounds.shape[0]
         self.num_tasks = num_tasks
@@ -77,6 +81,8 @@ class InteractiveOptimizer:
         self.train_y = torch.empty(0, num_tasks)
         self.gp = None
         self.meta = {}  # extra session-file keys (e.g. "description")
+        self.poly_degree = 2
+        self.set_kernel(kernel, poly_degree)
 
     # ------------------------------------------------------------------ data
 
@@ -113,6 +119,24 @@ class InteractiveOptimizer:
             raise ValueError("need at least 2 results to fit the GP")
         return self._fit(fit_iters)
 
+    def set_kernel(self, kernel, poly_degree=None):
+        """Choose how the posterior is fit.
+
+        ``kernel="rbf"`` (the default) is the flexible GP; ``kernel="poly"``
+        uses a polynomial kernel, whose posterior mean is exactly a
+        degree-``poly_degree`` polynomial in the concentrations. All results
+        are kept -- only the model refits.
+        """
+        if kernel not in ("rbf", "poly"):
+            raise ValueError("kernel must be 'rbf' or 'poly'")
+        if poly_degree is not None:
+            poly_degree = int(poly_degree)
+            if not 1 <= poly_degree <= 10:
+                raise ValueError("poly_degree must be between 1 and 10")
+            self.poly_degree = poly_degree
+        self.kernel = kernel
+        self.gp = None  # stale -- refit with the new kernel
+
     # ------------------------------------------------------------- proposals
 
     def _sample(self, n):
@@ -125,7 +149,14 @@ class InteractiveOptimizer:
 
     def _fit(self, fit_iters):
         if self.gp is None:
-            self.gp = MultitaskGP(self.train_x, self.train_y).fit(iters=fit_iters)
+            if self.kernel == "poly":
+                # the polynomial kernel needs longer to find its output scale
+                fit_iters = max(fit_iters, 300)
+            self.gp = MultitaskGP(
+                self.train_x, self.train_y,
+                kernel=self.kernel, degree=self.poly_degree,
+                x_bounds=self.bounds,
+            ).fit(iters=fit_iters)
         return self.gp
 
     def suggest(self, n=1, candidate_pool=2000, fit_iters=100):
@@ -239,6 +270,8 @@ class InteractiveOptimizer:
             "num_init": self.num_init,
             "factor_names": self.factor_names,
             "response_names": self.response_names,
+            "kernel": self.kernel,
+            "poly_degree": self.poly_degree,
             "train_x": self.train_x.tolist(),
             "train_y": self.train_y.tolist(),
         }
@@ -277,6 +310,8 @@ class InteractiveOptimizer:
             num_init=state["num_init"],
             factor_names=state["factor_names"],
             response_names=state["response_names"],
+            kernel=state.get("kernel", "rbf"),          # older session files
+            poly_degree=state.get("poly_degree", 2),    # predate the choice
         )
         if state["train_x"]:
             opt.train_x = torch.tensor(state["train_x"], dtype=torch.float32)

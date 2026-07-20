@@ -48,6 +48,11 @@ maps over every ingredient pair, with the experiments, predicted optimum and
 open proposals drawn on top), factor influence, response correlation, and
 cost tracking with projections. Sessions auto-save after every result and the
 history is exportable as CSV. The same session file works in the CLI below.
+A **fit** selector in the tab bar switches the posterior between the flexible
+GP (RBF kernel, default) and an n-degree polynomial (a polynomial-kernel GP,
+so the 95% bands, predicted optimum and proposals keep working); the choice
+is saved with the session (`InteractiveOptimizer(kernel="poly", poly_degree=3)`
+or `opt.set_kernel("poly", 3)` from Python).
 
 The 📁 session button in the header opens the **session manager**: a table of
 all session files next to the server (with description, result count and last

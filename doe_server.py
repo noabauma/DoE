@@ -184,6 +184,8 @@ def api_state():
             "maximize": opt.maximize,
             "cost_aware": opt.cost_aware,
             "num_init": opt.num_init,
+            "kernel": opt.kernel,
+            "poly_degree": opt.poly_degree,
             "num_results": opt.num_results,
             "results_x": opt.train_x.tolist(),
             "results_y": opt.train_y.tolist(),
@@ -249,6 +251,22 @@ def api_setup():
         )
         STATE["pending"] = []
         STATE.pop("predicted_best", None)
+        _save()
+        return api_state()
+
+
+@app.post("/api/fit")
+def api_fit():
+    """Choose how the posterior is fit: flexible GP (rbf) or n-degree polynomial."""
+    with LOCK:
+        opt = _opt()
+        data = request.get_json(force=True)
+        try:
+            opt.set_kernel(str(data.get("kernel", "rbf")),
+                           data.get("degree"))
+        except (ValueError, TypeError) as err:
+            raise ApiError(str(err))
+        STATE.pop("predicted_best", None)  # cached optimum used the old fit
         _save()
         return api_state()
 
@@ -321,9 +339,13 @@ def api_model():
                 "lower": lower.T.tolist(),
                 "upper": upper.T.tolist(),
             })
-        ls = torch.atleast_1d(gp.lengthscales.flatten())
-        importance = (1.0 / ls)
-        importance = (importance / importance.max()).tolist()
+        ls = gp.lengthscales  # None for the polynomial kernel (no ARD)
+        if ls is None:
+            importance = None
+        else:
+            ls = torch.atleast_1d(ls.flatten())
+            importance = (1.0 / ls)
+            importance = (importance / importance.max()).tolist()
         C = gp.task_covariance
         d = C.diagonal().clamp_min(1e-12).sqrt()
         correlation = (C / torch.outer(d, d)).tolist()
@@ -386,11 +408,13 @@ def api_landscape():
                 })
         return jsonify({
             "available": True,
-            # session + result count let the client detect a payload that
-            # belongs to another session or data version (the server is
-            # shared -- a second window can switch sessions under us)
+            # session + result count + fit choice let the client detect a
+            # payload that belongs to another session or data version (the
+            # server is shared -- a second window can switch it under us)
             "session": STATE["path"],
             "n": opt.num_results,
+            "kernel": opt.kernel,
+            "poly_degree": opt.poly_degree,
             "reference": ref.tolist(),
             "pairs": pairs,
             "predicted_best": _point(opt, _predicted_best(opt)),
