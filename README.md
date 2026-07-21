@@ -5,6 +5,8 @@ A small toolkit for Design of Experiment built on **GPyTorch multitask GP
 regression**: model several correlated responses jointly across multiple input
 factors, then let Bayesian optimization choose the next experiment to run.
 
+<img width="2687" height="1502" alt="DoE_example" src="https://github.com/user-attachments/assets/f1b313ca-6cc0-4b19-86d5-264079345690" />
+
 ## The `doe` module
 | Module | What it provides |
 |--------|------------------|
